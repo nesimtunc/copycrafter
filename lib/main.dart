@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -179,6 +180,8 @@ class _HomePageState extends State<HomePage> {
   ProjectType _projectType = ProjectType.none;
   String _searchQuery = ''; // Add search query
   final TextEditingController _searchController = TextEditingController(); // Add search controller
+  int _totalTokenCount = 0; // Add token count
+  Map<String, int> _fileTokenCounts = {}; // Store token counts per file
 
   @override
   void dispose() {
@@ -393,6 +396,18 @@ class _HomePageState extends State<HomePage> {
               ),
           ],
         ),
+        // Token count display
+        if (_totalTokenCount > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 4.0, bottom: 8.0),
+            child: Text(
+              'Estimated token count: $_totalTokenCount tokens',
+              style: const TextStyle(
+                color: Colors.blueGrey,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
         const SizedBox(height: 8),
         Expanded(
           child: Card(
@@ -426,6 +441,18 @@ class _HomePageState extends State<HomePage> {
               ),
           ],
         ),
+        // Token count display
+        if (_totalTokenCount > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 4.0, bottom: 8.0),
+            child: Text(
+              'Estimated token count: $_totalTokenCount tokens',
+              style: const TextStyle(
+                color: Colors.blueGrey,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
         const SizedBox(height: 8),
         Expanded(
           child: Card(
@@ -540,6 +567,18 @@ class _HomePageState extends State<HomePage> {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                // Display token count for selected files
+                if (!node.isDirectory && node.isSelected && _fileTokenCounts.containsKey(node.path))
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8.0),
+                    child: Text(
+                      '${_fileTokenCounts[node.path]} tokens',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.blueGrey,
+                      ),
+                    ),
+                  ),
                 if (node.isDirectory)
                   Padding(
                     padding: const EdgeInsets.only(right: 16.0),
@@ -621,6 +660,21 @@ class _HomePageState extends State<HomePage> {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                // Display token count for selected files
+                if (node.type == 'file' &&
+                    node.isSelected &&
+                    node.fullPath != null &&
+                    _fileTokenCounts.containsKey(node.fullPath))
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8.0),
+                    child: Text(
+                      '${_fileTokenCounts[node.fullPath]} tokens',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.blueGrey,
+                      ),
+                    ),
+                  ),
                 if (node.type == 'group' && node.fullPath != null)
                   Padding(
                     padding: const EdgeInsets.only(right: 16.0),
@@ -657,9 +711,16 @@ class _HomePageState extends State<HomePage> {
       if (node.isSelected) {
         if (!_selectedFiles.contains(node.path)) {
           _selectedFiles.add(node.path);
+          // Calculate token count for newly selected file
+          _calculateTokenCountForFile(node.path);
         }
       } else {
         _selectedFiles.remove(node.path);
+        // Update total token count by removing this file's tokens
+        if (_fileTokenCounts.containsKey(node.path)) {
+          _totalTokenCount -= _fileTokenCounts[node.path]!;
+          _fileTokenCounts.remove(node.path);
+        }
       }
 
       // Update the selection state in the original data structure
@@ -721,9 +782,16 @@ class _HomePageState extends State<HomePage> {
         if (selected) {
           if (!_selectedFiles.contains(child.path)) {
             _selectedFiles.add(child.path);
+            // Calculate token count for newly selected file
+            _calculateTokenCountForFile(child.path);
           }
         } else {
           _selectedFiles.remove(child.path);
+          // Update total token count by removing this file's tokens
+          if (_fileTokenCounts.containsKey(child.path)) {
+            _totalTokenCount -= _fileTokenCounts[child.path]!;
+            _fileTokenCounts.remove(child.path);
+          }
         }
       }
     }
@@ -738,9 +806,16 @@ class _HomePageState extends State<HomePage> {
       if (node.isSelected) {
         if (!_selectedFiles.contains(node.fullPath)) {
           _selectedFiles.add(node.fullPath!);
+          // Calculate token count for newly selected file
+          _calculateTokenCountForFile(node.fullPath!);
         }
       } else {
         _selectedFiles.remove(node.fullPath);
+        // Update total token count by removing this file's tokens
+        if (_fileTokenCounts.containsKey(node.fullPath)) {
+          _totalTokenCount -= _fileTokenCounts[node.fullPath]!;
+          _fileTokenCounts.remove(node.fullPath);
+        }
       }
 
       // Update the selection state in the original project structure
@@ -808,9 +883,16 @@ class _HomePageState extends State<HomePage> {
         if (selected) {
           if (!_selectedFiles.contains(child.fullPath)) {
             _selectedFiles.add(child.fullPath!);
+            // Calculate token count for newly selected file
+            _calculateTokenCountForFile(child.fullPath!);
           }
         } else {
           _selectedFiles.remove(child.fullPath);
+          // Update total token count by removing this file's tokens
+          if (_fileTokenCounts.containsKey(child.fullPath)) {
+            _totalTokenCount -= _fileTokenCounts[child.fullPath]!;
+            _fileTokenCounts.remove(child.fullPath);
+          }
         }
       }
     }
@@ -820,6 +902,8 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _selectedFiles = [];
       _selectedFolders = [];
+      _fileTokenCounts = {};
+      _totalTokenCount = 0;
       _updateNodeSelection();
     });
   }
@@ -1296,12 +1380,18 @@ class _HomePageState extends State<HomePage> {
         await _processFolderForCopy(folderPath, buffer);
       }
 
-      await Clipboard.setData(ClipboardData(text: buffer.toString()));
+      // Get the final text for clipboard
+      final clipboardText = buffer.toString();
+
+      // Calculate and show token count before copying
+      final totalTokens = SimpleTokenizer.countTokens(clipboardText);
+
+      await Clipboard.setData(ClipboardData(text: clipboardText));
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Copied content to clipboard'),
+          SnackBar(
+            content: Text('Copied content to clipboard (approx. $totalTokens tokens)'),
             backgroundColor: Colors.green,
           ),
         );
@@ -1834,5 +1924,55 @@ class _HomePageState extends State<HomePage> {
     for (var child in root.children) {
       _updateProjectFolderSelectionState(child, path, isSelected);
     }
+  }
+
+  // Calculate token count for a file
+  Future<void> _calculateTokenCountForFile(String filePath) async {
+    try {
+      File file = File(filePath);
+      if (await file.exists()) {
+        String content = await file.readAsString();
+        List<String> lines = content.split('\n');
+
+        // Check if we need to skip lines for this file type
+        String extension = path_util.extension(filePath).toLowerCase();
+        int skipLines = 0;
+        if (['.swift', '.m', '.h'].contains(extension)) {
+          skipLines = _linesToSkip;
+        }
+
+        // Get content starting from the appropriate line
+        String effectiveContent;
+        if (lines.length > skipLines) {
+          effectiveContent = lines.skip(skipLines).join('\n');
+        } else {
+          effectiveContent = content; // If file is shorter than skip lines, include everything
+        }
+
+        // Calculate token count
+        int tokenCount = SimpleTokenizer.countTokens(effectiveContent);
+
+        setState(() {
+          _fileTokenCounts[filePath] = tokenCount;
+
+          // Update total count
+          _totalTokenCount = 0;
+          for (var count in _fileTokenCounts.values) {
+            _totalTokenCount += count;
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('Error calculating token count for $filePath: $e');
+    }
+  }
+}
+
+// Simple regex-based tokenizer for approximating GPT tokenization
+class SimpleTokenizer {
+  static int countTokens(String text) {
+    // Very simple heuristic: for English text, tokens are roughly 4 chars on average
+    // This is a very rough approximation
+    return max(1, (text.length / 4).round());
   }
 }
