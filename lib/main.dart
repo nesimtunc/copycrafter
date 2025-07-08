@@ -714,6 +714,7 @@ class _HomePageState extends State<HomePage> {
           // Calculate token count for newly selected file
           _calculateTokenCountForFile(node.path);
         }
+        _propagateSelectionUpwards(node.path);
       } else {
         _selectedFiles.remove(node.path);
         // Update total token count by removing this file's tokens
@@ -721,6 +722,7 @@ class _HomePageState extends State<HomePage> {
           _totalTokenCount -= _fileTokenCounts[node.path]!;
           _fileTokenCounts.remove(node.path);
         }
+        _propagateDeselectionUpwards(node.path);
       }
 
       // Update the selection state in the original data structure
@@ -753,6 +755,9 @@ class _HomePageState extends State<HomePage> {
 
         // Deselect all children recursively
         _selectAllChildrenRecursively(node, false);
+
+        // Propagate deselection upwards
+        _propagateDeselectionUpwards(node.path);
       }
 
       // Update the selection state in the original data structure
@@ -773,6 +778,7 @@ class _HomePageState extends State<HomePage> {
           if (!_selectedFolders.contains(child.path)) {
             _selectedFolders.add(child.path);
           }
+          _propagateSelectionUpwards(child.path);
         } else {
           _selectedFolders.remove(child.path);
         }
@@ -785,6 +791,7 @@ class _HomePageState extends State<HomePage> {
             // Calculate token count for newly selected file
             _calculateTokenCountForFile(child.path);
           }
+          _propagateSelectionUpwards(child.path);
         } else {
           _selectedFiles.remove(child.path);
           // Update total token count by removing this file's tokens
@@ -809,6 +816,7 @@ class _HomePageState extends State<HomePage> {
           // Calculate token count for newly selected file
           _calculateTokenCountForFile(node.fullPath!);
         }
+        _propagateSelectionUpwards(node.fullPath!);
       } else {
         _selectedFiles.remove(node.fullPath);
         // Update total token count by removing this file's tokens
@@ -816,6 +824,7 @@ class _HomePageState extends State<HomePage> {
           _totalTokenCount -= _fileTokenCounts[node.fullPath]!;
           _fileTokenCounts.remove(node.fullPath);
         }
+        _propagateDeselectionUpwards(node.fullPath!);
       }
 
       // Update the selection state in the original project structure
@@ -850,6 +859,9 @@ class _HomePageState extends State<HomePage> {
 
         // Deselect all children recursively
         _selectAllProjectChildrenRecursively(node, false);
+
+        // Propagate deselection upwards
+        _propagateDeselectionUpwards(node.fullPath!);
       }
 
       // Update the selection state in the original project structure
@@ -873,6 +885,7 @@ class _HomePageState extends State<HomePage> {
             if (!_selectedFolders.contains(child.fullPath)) {
               _selectedFolders.add(child.fullPath!);
             }
+            _propagateSelectionUpwards(child.fullPath!);
           } else {
             _selectedFolders.remove(child.fullPath);
           }
@@ -886,6 +899,7 @@ class _HomePageState extends State<HomePage> {
             // Calculate token count for newly selected file
             _calculateTokenCountForFile(child.fullPath!);
           }
+          _propagateSelectionUpwards(child.fullPath!);
         } else {
           _selectedFiles.remove(child.fullPath);
           // Update total token count by removing this file's tokens
@@ -1965,6 +1979,144 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       debugPrint('Error calculating token count for $filePath: $e');
     }
+  }
+
+  // Propagate selection up the hierarchy
+  void _propagateSelectionUpwards(String path) {
+    List<String> parentsToSelect = [];
+
+    // File system view
+    FileNode? currentFileParent = _findParentFileNode(_nodes, path);
+    while (currentFileParent != null) {
+      if (!_selectedFolders.contains(currentFileParent.path) && _areAllChildrenSelected(currentFileParent)) {
+        parentsToSelect.add(currentFileParent.path);
+      }
+      currentFileParent = _findParentFileNode(_nodes, currentFileParent.path);
+    }
+
+    // Project view
+    ProjectNode? currentProjectParent = _findParentProjectNode(_projectNode, path);
+    while (currentProjectParent != null) {
+      if (currentProjectParent.fullPath != null &&
+          !_selectedFolders.contains(currentProjectParent.fullPath!) &&
+          _areAllProjectChildrenSelected(currentProjectParent)) {
+        parentsToSelect.add(currentProjectParent.fullPath!);
+      }
+      // The path to find the next parent is the current parent's fullPath
+      currentProjectParent = currentProjectParent.fullPath != null
+          ? _findParentProjectNode(_projectNode, currentProjectParent.fullPath!)
+          : null;
+    }
+
+    if (parentsToSelect.isNotEmpty) {
+      setState(() {
+        _selectedFolders.addAll(parentsToSelect);
+        _updateNodeSelection();
+      });
+    }
+  }
+
+  // Check if all children of a file node are selected
+  bool _areAllChildrenSelected(FileNode node) {
+    for (var child in node.children) {
+      if (child.isDirectory) {
+        if (!_selectedFolders.contains(child.path) || !_areAllChildrenSelected(child)) {
+          return false;
+        }
+      } else {
+        if (!_selectedFiles.contains(child.path)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // Check if all children of a project node are selected
+  bool _areAllProjectChildrenSelected(ProjectNode node) {
+    for (var child in node.children) {
+      if (child.type == 'group') {
+        if (child.fullPath == null ||
+            !_selectedFolders.contains(child.fullPath!) ||
+            !_areAllProjectChildrenSelected(child)) {
+          return false;
+        }
+      } else {
+        if (child.fullPath == null || !_selectedFiles.contains(child.fullPath!)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // Propagate deselection up the hierarchy
+  void _propagateDeselectionUpwards(String path) {
+    List<String> parentsToDeselect = [];
+
+    // File system view
+    FileNode? currentFileParent = _findParentFileNode(_nodes, path);
+    while (currentFileParent != null) {
+      if (_selectedFolders.contains(currentFileParent.path)) {
+        parentsToDeselect.add(currentFileParent.path);
+      }
+      currentFileParent = _findParentFileNode(_nodes, currentFileParent.path);
+    }
+
+    // Project view
+    ProjectNode? currentProjectParent = _findParentProjectNode(_projectNode, path);
+    while (currentProjectParent != null) {
+      if (currentProjectParent.fullPath != null && _selectedFolders.contains(currentProjectParent.fullPath!)) {
+        parentsToDeselect.add(currentProjectParent.fullPath!);
+      }
+      // The path to find the next parent is the current parent's fullPath
+      currentProjectParent = currentProjectParent.fullPath != null
+          ? _findParentProjectNode(_projectNode, currentProjectParent.fullPath!)
+          : null;
+    }
+
+    if (parentsToDeselect.isNotEmpty) {
+      setState(() {
+        _selectedFolders.removeWhere((folderPath) => parentsToDeselect.contains(folderPath));
+        _updateNodeSelection();
+      });
+    }
+  }
+
+  // Find parent of a file node
+  FileNode? _findParentFileNode(List<FileNode> nodes, String path) {
+    for (var node in nodes) {
+      if (node.isDirectory) {
+        for (var child in node.children) {
+          if (child.path == path) {
+            return node;
+          }
+        }
+        final found = _findParentFileNode(node.children, path);
+        if (found != null) {
+          return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Find parent of a project node
+  ProjectNode? _findParentProjectNode(ProjectNode? node, String path) {
+    if (node == null) return null;
+
+    for (var child in node.children) {
+      if (child.fullPath == path) {
+        return node;
+      }
+      if (child.type == 'group') {
+        final found = _findParentProjectNode(child, path);
+        if (found != null) {
+          return found;
+        }
+      }
+    }
+    return null;
   }
 }
 
