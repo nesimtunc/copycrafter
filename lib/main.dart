@@ -1443,7 +1443,7 @@ class _HomePageState extends State<HomePage> {
 
       // Add a file header
       buffer.writeln('');
-      buffer.writeln('// File: ${path_util.basename(filePath)}');
+      buffer.writeln('// File: ${path_util.relative(filePath, from: _selectedDirectory!)}');
       buffer.writeln('// ${'-' * 50}');
 
       // Add content starting from the appropriate line
