@@ -187,6 +187,7 @@ class _HomePageState extends State<HomePage> {
   int _processedFiles = 0; // Number of files processed
   int _totalFilesToProcess = 0; // Total files to process
   bool _progressDialogShown = false; // Track if progress dialog is shown
+  bool _isSaving = false; // Track if saving to file is in progress
 
   @override
   void dispose() {
@@ -365,31 +366,62 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 16),
 
-            // Copy button
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: (_selectedFiles.isEmpty && _selectedFolders.isEmpty) || _isCopying
-                    ? null
-                    : _copySelectedToClipboard,
-                icon: _isCopying
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.copy),
-                label: Text(
-                  _isCopying
-                      ? 'Copying...'
-                      : 'Copy Selected to Clipboard (${_selectedFiles.length} files, ${_selectedFolders.length} folders)',
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.primary,
-                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
+            // Selection info
+            if (_selectedFiles.isNotEmpty || _selectedFolders.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8.0),
+                child: Text(
+                  'Selected: ${_selectedFiles.length} files, ${_selectedFolders.length} folders',
+                  style: const TextStyle(fontWeight: FontWeight.w500),
                 ),
               ),
+            // Action buttons row
+            Row(
+              children: [
+                // Copy to Clipboard button
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: (_selectedFiles.isEmpty && _selectedFolders.isEmpty) || _isCopying || _isSaving
+                        ? null
+                        : _copySelectedToClipboard,
+                    icon: _isCopying
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.copy),
+                    label: Text(_isCopying ? 'Copying...' : 'Copy to Clipboard'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.primary,
+                      foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Save to File button
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: (_selectedFiles.isEmpty && _selectedFolders.isEmpty) || _isCopying || _isSaving
+                        ? null
+                        : _saveSelectedToFile,
+                    icon: _isSaving
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_alt),
+                    label: Text(_isSaving ? 'Saving...' : 'Save to File'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.secondary,
+                      foregroundColor: Theme.of(context).colorScheme.onSecondary,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -1730,6 +1762,22 @@ class _HomePageState extends State<HomePage> {
     return result;
   }
 
+  Future<String> _generateSelectedContent() async {
+    StringBuffer buffer = StringBuffer();
+
+    // First process individual files
+    for (String filePath in _selectedFiles) {
+      await _processFileForCopy(filePath, buffer);
+    }
+
+    // Now process all files within selected folders
+    for (String folderPath in _selectedFolders) {
+      await _processFolderForCopy(folderPath, buffer);
+    }
+
+    return buffer.toString();
+  }
+
   Future<void> _copySelectedToClipboard() async {
     if (_selectedFiles.isEmpty && _selectedFolders.isEmpty) return;
 
@@ -1738,20 +1786,8 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      StringBuffer buffer = StringBuffer();
-
-      // First process individual files
-      for (String filePath in _selectedFiles) {
-        await _processFileForCopy(filePath, buffer);
-      }
-
-      // Now process all files within selected folders
-      for (String folderPath in _selectedFolders) {
-        await _processFolderForCopy(folderPath, buffer);
-      }
-
       // Get the final text for clipboard
-      final clipboardText = buffer.toString();
+      final clipboardText = await _generateSelectedContent();
 
       // Calculate and show token count before copying
       final totalTokens = SimpleTokenizer.countTokens(clipboardText);
@@ -1779,6 +1815,65 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         setState(() {
           _isCopying = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _saveSelectedToFile() async {
+    if (_selectedFiles.isEmpty && _selectedFolders.isEmpty) return;
+
+    setState(() {
+      _isSaving = true;
+    });
+
+    try {
+      // Generate the content
+      final content = await _generateSelectedContent();
+
+      // Calculate token count
+      final totalTokens = SimpleTokenizer.countTokens(content);
+
+      // Let user choose where to save the file
+      String? outputPath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save selected content to file',
+        fileName: 'copycrafter_output.txt',
+        type: FileType.custom,
+        allowedExtensions: ['txt', 'md'],
+      );
+
+      if (outputPath != null) {
+        // Ensure the file has an extension
+        if (!outputPath.endsWith('.txt') && !outputPath.endsWith('.md')) {
+          outputPath = '$outputPath.txt';
+        }
+
+        // Write the content to the file
+        final file = File(outputPath);
+        await file.writeAsString(content);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Saved to file (approx. $totalTokens tokens): ${path_util.basename(outputPath)}'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error saving to file: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
         });
       }
     }
