@@ -182,6 +182,11 @@ class _HomePageState extends State<HomePage> {
   final TextEditingController _searchController = TextEditingController(); // Add search controller
   int _totalTokenCount = 0; // Add token count
   Map<String, int> _fileTokenCounts = {}; // Store token counts per file
+  bool _isProcessingFolder = false; // Track if folder is being processed
+  String _processingStatus = ''; // Current processing status message
+  int _processedFiles = 0; // Number of files processed
+  int _totalFilesToProcess = 0; // Total files to process
+  bool _progressDialogShown = false; // Track if progress dialog is shown
 
   @override
   void dispose() {
@@ -189,8 +194,38 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
+  void _showProgressDialog() {
+    if (!_progressDialogShown && mounted) {
+      _progressDialogShown = true;
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _ProgressDialogWidget(
+          getProcessedFiles: () => _processedFiles,
+          getTotalFiles: () => _totalFilesToProcess,
+          getStatus: () => _processingStatus,
+          getIsProcessing: () => _isProcessingFolder,
+        ),
+      );
+    }
+  }
+
+  void _hideProgressDialog() {
+    if (_progressDialogShown && mounted) {
+      _progressDialogShown = false;
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Show/hide progress dialog when processing folder
+    if (_isProcessingFolder && !_progressDialogShown) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showProgressDialog());
+    } else if (!_isProcessingFolder && _progressDialogShown) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _hideProgressDialog());
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('CopyCrafter'),
@@ -361,6 +396,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+
 
   String _getProjectTypeString() {
     switch (_projectType) {
@@ -735,39 +771,263 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _toggleFolderSelection(FileNode node) {
+  Future<void> _toggleFolderSelection(FileNode node) async {
     if (!node.isDirectory) return;
 
-    setState(() {
-      node.isSelected = !node.isSelected;
-
-      if (node.isSelected) {
-        // Add folder to selected folders
-        if (!_selectedFolders.contains(node.path)) {
-          _selectedFolders.add(node.path);
-        }
-
-        // Select all children recursively
-        _selectAllChildrenRecursively(node, true);
-      } else {
-        // Remove folder from selected folders
+    if (node.isSelected) {
+      // Deselecting is fast, do it synchronously
+      setState(() {
+        node.isSelected = false;
         _selectedFolders.remove(node.path);
-
-        // Deselect all children recursively
         _selectAllChildrenRecursively(node, false);
-
-        // Propagate deselection upwards
         _propagateDeselectionUpwards(node.path);
-      }
+        _updateFolderSelectionState(node.path, false);
+      });
+      return;
+    }
 
-      // Update the selection state in the original data structure
-      _updateFolderSelectionState(node.path, node.isSelected);
-
-      // If we're in search mode, this will trigger a rebuild with updated selection states
-      if (_searchQuery.isNotEmpty) {
-        // Force rebuild with updated states
+    // Selecting requires processing, show progress
+    setState(() {
+      node.isSelected = true;
+      if (!_selectedFolders.contains(node.path)) {
+        _selectedFolders.add(node.path);
       }
+      _isProcessingFolder = true;
+      _processedFiles = 0;
+      _totalFilesToProcess = 0;
+      _processingStatus = 'Scanning folder...';
     });
+
+    try {
+      // First, count total files to process
+      _totalFilesToProcess = await _countTextFilesInFolder(node.path);
+
+      setState(() {
+        _processingStatus = 'Processing files...';
+      });
+
+      // Now process files with progress updates
+      await _selectAllChildrenRecursivelyAsync(node, true);
+
+      if (mounted) {
+        setState(() {
+          _isProcessingFolder = false;
+          _processingStatus = '';
+          _updateFolderSelectionState(node.path, true);
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _isProcessingFolder = false;
+        _processingStatus = '';
+        node.isSelected = false;
+        _selectedFolders.remove(node.path);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error processing folder: $e')),
+        );
+      }
+    }
+  }
+
+  // Get folders to skip based on project type
+  Set<String> _getFoldersToSkip() {
+    final folders = <String>{
+      // Common build and dependency folders
+      'build',
+      '.dart_tool',
+      '.gradle',
+      '.idea',
+      'node_modules',
+      'vendor',
+      '.nuget',
+      'bin',
+      'obj',
+      '.vs',
+      'DerivedData',
+      '.swiftpm',
+      '.pub-cache',
+      '.fvm',
+      'Pods',
+      '.cocoapods',
+      '.git',
+      '.svn',
+      '.hg',
+      '.symlinks', // Flutter iOS symlinks
+    };
+
+    // Add project-specific folders
+    switch (_projectType) {
+      case ProjectType.flutter:
+        folders.addAll({
+          '.dart_tool',
+          'build',
+          '.pub-cache',
+          '.fvm',
+          'packages', // Legacy Flutter packages
+        });
+        break;
+      case ProjectType.android:
+        folders.addAll({
+          'build',
+          '.gradle',
+          '.idea',
+        });
+        break;
+      case ProjectType.xcode:
+        folders.addAll({
+          'build',
+          'DerivedData',
+          '.swiftpm',
+          'Pods',
+          '.cocoapods',
+          '.xcodebuild',
+        });
+        break;
+      case ProjectType.dotNet:
+        folders.addAll({
+          'bin',
+          'obj',
+          '.vs',
+          '.nuget',
+          'packages', // NuGet packages
+        });
+        break;
+      case ProjectType.none:
+        // For unknown projects, skip common folders
+        break;
+    }
+
+    return folders;
+  }
+
+  // Check if a directory should be skipped
+  bool _shouldSkipDirectory(String dirName) {
+    return _getFoldersToSkip().contains(dirName);
+  }
+
+  // Check if a file is a text file (non-binary) based on extension
+  bool _isTextFile(String filePath) {
+    final extension = path_util.extension(filePath).toLowerCase();
+
+    // Common binary file extensions to exclude
+    final binaryExtensions = {
+      // Images
+      '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.ico', '.webp',
+      '.tiff', '.tif', '.heic', '.heif', '.raw', '.cr2', '.nef', '.orf',
+      '.sr2', '.psd', '.ai', '.eps', '.avif', '.dng', '.arw', '.rw2',
+      '.raf', '.x3f', '.srw', '.pef', '.mrw',
+      // Videos
+      '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.mkv', '.m4v',
+      '.3gp', '.ogv', '.mpg', '.mpeg', '.m2v', '.mts', '.m2ts',
+      // Audio
+      '.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a', '.opus',
+      '.aiff', '.au', '.ra', '.amr',
+      // Archives
+      '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.dmg', '.iso',
+      '.cab', '.deb', '.rpm', '.pkg', '.apk', '.ipa',
+      // Documents (binary formats)
+      '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+      // Fonts
+      '.ttf', '.otf', '.woff', '.woff2', '.eot', '.fon',
+      // Executables and libraries
+      '.exe', '.dll', '.so', '.dylib', '.app',
+      // Databases
+      '.db', '.sqlite', '.sqlite3', '.mdb', '.accdb',
+      // Other binary
+      '.bin', '.dat', '.jar', '.war', '.ear', '.class', '.pyc', '.pyo',
+      '.o', '.obj', '.a', '.lib', '.framework',
+    };
+
+    return !binaryExtensions.contains(extension);
+  }
+
+  // Check if a path contains any skipped directory
+  bool _pathContainsSkippedDirectory(String filePath, Set<String> foldersToSkip) {
+    // Get relative path segments
+    final normalizedPath = path_util.normalize(filePath);
+    final segments = normalizedPath.split(path_util.separator);
+    for (final segment in segments) {
+      if (foldersToSkip.contains(segment)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Count text files in a folder recursively
+  Future<int> _countTextFilesInFolder(String folderPath) async {
+    int count = 0;
+    try {
+      final directory = Directory(folderPath);
+      if (await directory.exists()) {
+        final foldersToSkip = _getFoldersToSkip();
+        await for (var entity in directory.list(recursive: true)) {
+          if (entity is File) {
+            final name = path_util.basename(entity.path);
+            if (!name.startsWith('.') && _isTextFile(entity.path)) {
+              // Check if file is in a skipped directory
+              if (!_pathContainsSkippedDirectory(entity.path, foldersToSkip)) {
+                count++;
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error counting files in folder: $e');
+    }
+    return count;
+  }
+
+  // Async version for selecting children with progress updates
+  Future<void> _selectAllChildrenRecursivelyAsync(FileNode node, bool selected) async {
+    for (var child in node.children) {
+      if (child.isDirectory) {
+        child.isSelected = selected;
+        if (selected) {
+          if (!_selectedFolders.contains(child.path)) {
+            _selectedFolders.add(child.path);
+          }
+          _propagateSelectionUpwards(child.path);
+        } else {
+          _selectedFolders.remove(child.path);
+        }
+        await _selectAllChildrenRecursivelyAsync(child, selected);
+      } else {
+        // Only select text files (non-binary)
+        if (!_isTextFile(child.path)) {
+          continue;
+        }
+        child.isSelected = selected;
+        if (selected) {
+          if (!_selectedFiles.contains(child.path)) {
+            _selectedFiles.add(child.path);
+
+            // Update progress
+            setState(() {
+              _processedFiles++;
+              _processingStatus = 'Processing: ${path_util.basename(child.path)}';
+            });
+            
+            // Calculate token count for newly selected file
+            await _calculateTokenCountForFile(child.path);
+
+            // Allow UI to update
+            await Future.delayed(const Duration(milliseconds: 1));
+          }
+          _propagateSelectionUpwards(child.path);
+        } else {
+          _selectedFiles.remove(child.path);
+          // Update total token count by removing this file's tokens
+          if (_fileTokenCounts.containsKey(child.path)) {
+            _totalTokenCount -= _fileTokenCounts[child.path]!;
+            _fileTokenCounts.remove(child.path);
+          }
+        }
+      }
+    }
   }
 
   void _selectAllChildrenRecursively(FileNode node, bool selected) {
@@ -784,6 +1044,10 @@ class _HomePageState extends State<HomePage> {
         }
         _selectAllChildrenRecursively(child, selected);
       } else {
+        // Only select text files (non-binary)
+        if (!_isTextFile(child.path)) {
+          continue;
+        }
         child.isSelected = selected;
         if (selected) {
           if (!_selectedFiles.contains(child.path)) {
@@ -839,41 +1103,119 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  void _toggleProjectFolderSelection(ProjectNode node) {
+  Future<void> _toggleProjectFolderSelection(ProjectNode node) async {
     if (node.type != 'group' || node.fullPath == null) return;
 
-    setState(() {
-      node.isSelected = !node.isSelected;
-
-      if (node.isSelected) {
-        // Add folder to selected folders
-        if (!_selectedFolders.contains(node.fullPath)) {
-          _selectedFolders.add(node.fullPath!);
-        }
-
-        // Select all children recursively
-        _selectAllProjectChildrenRecursively(node, true);
-      } else {
-        // Remove folder from selected folders
+    if (node.isSelected) {
+      // Deselecting is fast, do it synchronously
+      setState(() {
+        node.isSelected = false;
         _selectedFolders.remove(node.fullPath);
-
-        // Deselect all children recursively
         _selectAllProjectChildrenRecursively(node, false);
-
-        // Propagate deselection upwards
         _propagateDeselectionUpwards(node.fullPath!);
-      }
+        if (_projectNode != null) {
+          _updateProjectFolderSelectionState(_projectNode!, node.fullPath!, false);
+        }
+      });
+      return;
+    }
 
-      // Update the selection state in the original project structure
-      if (_projectNode != null) {
-        _updateProjectFolderSelectionState(_projectNode!, node.fullPath!, node.isSelected);
+    // Selecting requires processing, show progress
+    setState(() {
+      node.isSelected = true;
+      if (!_selectedFolders.contains(node.fullPath)) {
+        _selectedFolders.add(node.fullPath!);
       }
-
-      // If we're in search mode, this will trigger a rebuild with updated selection states
-      if (_searchQuery.isNotEmpty) {
-        // Force rebuild with updated states
-      }
+      _isProcessingFolder = true;
+      _processedFiles = 0;
+      _totalFilesToProcess = 0;
+      _processingStatus = 'Scanning folder...';
     });
+
+    try {
+      // First, count total files to process
+      _totalFilesToProcess = await _countTextFilesInFolder(node.fullPath!);
+      
+      setState(() {
+        _processingStatus = 'Processing files...';
+      });
+
+      // Now process files with progress updates
+      await _selectAllProjectChildrenRecursivelyAsync(node, true);
+
+      if (mounted) {
+        setState(() {
+          _isProcessingFolder = false;
+          _processingStatus = '';
+          if (_projectNode != null) {
+            _updateProjectFolderSelectionState(_projectNode!, node.fullPath!, true);
+          }
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _isProcessingFolder = false;
+        _processingStatus = '';
+        node.isSelected = false;
+        _selectedFolders.remove(node.fullPath);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error processing folder: $e')),
+        );
+      }
+    }
+  }
+
+  // Async version for selecting project children with progress updates
+  Future<void> _selectAllProjectChildrenRecursivelyAsync(ProjectNode node, bool selected) async {
+    for (var child in node.children) {
+      if (child.type == 'group') {
+        child.isSelected = selected;
+        if (child.fullPath != null) {
+          if (selected) {
+            if (!_selectedFolders.contains(child.fullPath)) {
+              _selectedFolders.add(child.fullPath!);
+            }
+            _propagateSelectionUpwards(child.fullPath!);
+          } else {
+            _selectedFolders.remove(child.fullPath);
+          }
+        }
+        await _selectAllProjectChildrenRecursivelyAsync(child, selected);
+      } else if (child.fullPath != null) {
+        // Only select text files (non-binary)
+        if (!_isTextFile(child.fullPath!)) {
+          continue;
+        }
+        child.isSelected = selected;
+        if (selected) {
+          if (!_selectedFiles.contains(child.fullPath)) {
+            _selectedFiles.add(child.fullPath!);
+
+            // Update progress
+            setState(() {
+              _processedFiles++;
+              _processingStatus = 'Processing: ${path_util.basename(child.fullPath!)}';
+            });
+            
+            // Calculate token count for newly selected file
+            await _calculateTokenCountForFile(child.fullPath!);
+
+            // Allow UI to update
+            await Future.delayed(const Duration(milliseconds: 1));
+          }
+          _propagateSelectionUpwards(child.fullPath!);
+        } else {
+          _selectedFiles.remove(child.fullPath);
+          // Update total token count by removing this file's tokens
+          if (_fileTokenCounts.containsKey(child.fullPath)) {
+            _totalTokenCount -= _fileTokenCounts[child.fullPath]!;
+            _fileTokenCounts.remove(child.fullPath);
+          }
+        }
+      }
+    }
   }
 
   void _selectAllProjectChildrenRecursively(ProjectNode node, bool selected) {
@@ -892,6 +1234,10 @@ class _HomePageState extends State<HomePage> {
         }
         _selectAllProjectChildrenRecursively(child, selected);
       } else if (child.fullPath != null) {
+        // Only select text files (non-binary)
+        if (!_isTextFile(child.fullPath!)) {
+          continue;
+        }
         child.isSelected = selected;
         if (selected) {
           if (!_selectedFiles.contains(child.fullPath)) {
@@ -1231,6 +1577,9 @@ class _HomePageState extends State<HomePage> {
               if (name.startsWith('.')) continue;
 
               if (entity is Directory) {
+                // Skip dependency and build folders
+                if (_shouldSkipDirectory(name)) continue;
+                
                 final children = await scanDir(entity, entity.path);
                 if (children.isNotEmpty) {
                   result.add({
@@ -1345,24 +1694,31 @@ class _HomePageState extends State<HomePage> {
       });
 
       for (var entity in entities) {
+        final name = path_util.basename(entity.path);
+        
         // Skip hidden files and directories
-        if (path_util.basename(entity.path).startsWith('.')) {
+        if (name.startsWith('.')) {
           continue;
         }
 
         if (entity is Directory) {
+          // Skip dependency and build folders
+          if (_shouldSkipDirectory(name)) {
+            continue;
+          }
+          
           List<FileNode> children = await _buildDirectoryTree(entity);
 
           result.add(FileNode(
             path: entity.path,
-            name: path_util.basename(entity.path),
+            name: name,
             isDirectory: true,
             children: children,
           ));
         } else if (entity is File) {
           result.add(FileNode(
             path: entity.path,
-            name: path_util.basename(entity.path),
+            name: name,
             isDirectory: false,
           ));
         }
@@ -1431,29 +1787,40 @@ class _HomePageState extends State<HomePage> {
   Future<void> _processFileForCopy(String filePath, StringBuffer buffer) async {
     File file = File(filePath);
     if (await file.exists()) {
-      String content = await file.readAsString();
-      List<String> lines = content.split('\n');
-
-      // Check if we need to skip lines for this file type
-      String extension = path_util.extension(filePath).toLowerCase();
-      int skipLines = 0;
-      if (['.swift', '.m', '.h'].contains(extension)) {
-        skipLines = _linesToSkip;
+      // Skip binary files
+      if (!_isTextFile(filePath)) {
+        return;
       }
 
-      // Add a file header
-      buffer.writeln('');
-      buffer.writeln('// File: ${path_util.relative(filePath, from: _selectedDirectory!)}');
-      buffer.writeln('// ${'-' * 50}');
+      try {
+        String content = await file.readAsString();
+        List<String> lines = content.split('\n');
 
-      // Add content starting from the appropriate line
-      if (lines.length > skipLines) {
-        buffer.writeln(lines.skip(skipLines).join('\n'));
-      } else {
-        buffer.writeln(content); // If file is shorter than skip lines, include everything
+        // Check if we need to skip lines for this file type
+        String extension = path_util.extension(filePath).toLowerCase();
+        int skipLines = 0;
+        if (['.swift', '.m', '.h'].contains(extension)) {
+          skipLines = _linesToSkip;
+        }
+
+        // Add a file header
+        buffer.writeln('');
+        buffer.writeln('// File: ${path_util.relative(filePath, from: _selectedDirectory!)}');
+        buffer.writeln('// ${'-' * 50}');
+
+        // Add content starting from the appropriate line
+        if (lines.length > skipLines) {
+          buffer.writeln(lines.skip(skipLines).join('\n'));
+        } else {
+          buffer.writeln(content); // If file is shorter than skip lines, include everything
+        }
+
+        buffer.writeln('');
+      } catch (e) {
+        // Silently skip binary files that can't be read as text
+        // This is expected for binary files that weren't caught by extension check
+        return;
       }
-
-      buffer.writeln('');
     }
   }
 
@@ -1461,11 +1828,22 @@ class _HomePageState extends State<HomePage> {
     try {
       Directory directory = Directory(folderPath);
       if (await directory.exists()) {
+        final foldersToSkip = _getFoldersToSkip();
         // Process files in this directory and subdirectories
         await for (var entity in directory.list(recursive: true)) {
           if (entity is File) {
             // Skip hidden files
             if (path_util.basename(entity.path).startsWith('.')) {
+              continue;
+            }
+
+            // Check if file is in a skipped directory
+            if (_pathContainsSkippedDirectory(entity.path, foldersToSkip)) {
+              continue;
+            }
+
+            // Skip binary files (images, videos, etc.)
+            if (!_isTextFile(entity.path)) {
               continue;
             }
 
@@ -1730,6 +2108,9 @@ class _HomePageState extends State<HomePage> {
         if (skipHidden && name.startsWith('.')) continue;
 
         if (entity is Directory) {
+          // Skip dependency and build folders
+          if (_shouldSkipDirectory(name)) continue;
+          
           final children = await _scanDirectoryForProject(entity.path, skipHidden);
           if (children.isNotEmpty || !skipHidden) {
             nodes.add(ProjectNode(
@@ -1943,6 +2324,11 @@ class _HomePageState extends State<HomePage> {
   // Calculate token count for a file
   Future<void> _calculateTokenCountForFile(String filePath) async {
     try {
+      // Skip binary files
+      if (!_isTextFile(filePath)) {
+        return;
+      }
+
       File file = File(filePath);
       if (await file.exists()) {
         String content = await file.readAsString();
@@ -1977,7 +2363,9 @@ class _HomePageState extends State<HomePage> {
         });
       }
     } catch (e) {
-      debugPrint('Error calculating token count for $filePath: $e');
+      // Silently skip binary files that can't be read as text
+      // This is expected for binary files that weren't caught by extension check
+      return;
     }
   }
 
@@ -2117,6 +2505,80 @@ class _HomePageState extends State<HomePage> {
       }
     }
     return null;
+  }
+}
+
+// Progress dialog widget that updates itself
+class _ProgressDialogWidget extends StatefulWidget {
+  final int Function() getProcessedFiles;
+  final int Function() getTotalFiles;
+  final String Function() getStatus;
+  final bool Function() getIsProcessing;
+
+  const _ProgressDialogWidget({
+    required this.getProcessedFiles,
+    required this.getTotalFiles,
+    required this.getStatus,
+    required this.getIsProcessing,
+  });
+
+  @override
+  State<_ProgressDialogWidget> createState() => _ProgressDialogWidgetState();
+}
+
+class _ProgressDialogWidgetState extends State<_ProgressDialogWidget> {
+  @override
+  void initState() {
+    super.initState();
+    // Update dialog periodically while processing
+    _updateDialog();
+  }
+
+  void _updateDialog() {
+    if (widget.getIsProcessing() && mounted) {
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (mounted && widget.getIsProcessing()) {
+          setState(() {});
+          _updateDialog();
+        }
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final processedFiles = widget.getProcessedFiles();
+    final totalFiles = widget.getTotalFiles();
+    final status = widget.getStatus();
+    final progress = totalFiles > 0 ? processedFiles / totalFiles : 0.0;
+
+    return PopScope(
+      canPop: false, // Prevent dismissing while processing
+      child: AlertDialog(
+        title: const Text('Processing Folder'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(status),
+            const SizedBox(height: 16),
+            LinearProgressIndicator(
+              value: progress,
+              minHeight: 8,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '$processedFiles / $totalFiles files',
+              style: const TextStyle(fontSize: 12),
+            ),
+            if (progress > 0)
+              Text(
+                '${(progress * 100).toStringAsFixed(1)}%',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
