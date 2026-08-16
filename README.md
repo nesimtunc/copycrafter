@@ -10,6 +10,7 @@ A desktop application for macOS and Windows that helps browse folders and copy f
 - **Tree View**: View all files and subfolders in a hierarchical tree structure
 - **File & Folder Selection**: Select multiple files and folders using checkboxes
 - **Clipboard Copy**: Copy the contents of all selected files and folders to clipboard
+- **Folder Structure Copy**: Copy the complete current folder tree, including files and subfolders, to the clipboard in a `tree`-style format
 - **Save to File**: Export selected file contents to a text or markdown file
 - **Token Count Estimation**: Real-time display of estimated token count for selected files (useful for LLM context limits)
 - **Special File Handling**: Skip the first X lines from certain file types (e.g., copyright headers in .swift, .m, and .h files)
@@ -108,6 +109,7 @@ Pre-built releases are available on the [GitHub Releases page](https://github.co
 5. Use the search box to quickly filter and find specific files or folders
 6. Configure how many lines to skip for Swift/Objective-C files (default: 7)
 7. Choose your preferred action:
+   - Click "Copy Structure" to copy the current folder's recursive file and folder tree without file contents
    - Click "Copy to Clipboard" to copy the contents of all selected files
    - Click "Save to File" to export the contents to a .txt or .md file
 8. Paste or use the exported contents wherever needed

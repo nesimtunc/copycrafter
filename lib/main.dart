@@ -176,6 +176,7 @@ class _HomePageState extends State<HomePage> {
   List<String> _selectedFolders = []; // Track selected folders
   bool _isLoading = false;
   bool _isCopying = false;
+  bool _isCopyingStructure = false;
   int _linesToSkip = 7;
   ViewMode _viewMode = ViewMode.fileSystem;
   ProjectType _projectType = ProjectType.none;
@@ -384,10 +385,38 @@ class _HomePageState extends State<HomePage> {
             // Action buttons row
             Row(
               children: [
+                // Copy the visible folder tree without file contents.
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _selectedDirectory == null ||
+                            _isCopying ||
+                            _isCopyingStructure ||
+                            _isSaving
+                        ? null
+                        : _copyFolderStructureToClipboard,
+                    icon: _isCopyingStructure
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.account_tree),
+                    label: Text(
+                      _isCopyingStructure ? 'Copying...' : 'Copy Structure',
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
                 // Copy to Clipboard button
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: (_selectedFiles.isEmpty && _selectedFolders.isEmpty) || _isCopying || _isSaving
+                    onPressed: (_selectedFiles.isEmpty && _selectedFolders.isEmpty) ||
+                            _isCopying ||
+                            _isCopyingStructure ||
+                            _isSaving
                         ? null
                         : _copySelectedToClipboard,
                     icon: _isCopying
@@ -409,7 +438,10 @@ class _HomePageState extends State<HomePage> {
                 // Save to File button
                 Expanded(
                   child: ElevatedButton.icon(
-                    onPressed: (_selectedFiles.isEmpty && _selectedFolders.isEmpty) || _isCopying || _isSaving
+                    onPressed: (_selectedFiles.isEmpty && _selectedFolders.isEmpty) ||
+                            _isCopying ||
+                            _isCopyingStructure ||
+                            _isSaving
                         ? null
                         : _saveSelectedToFile,
                     icon: _isSaving
@@ -1877,6 +1909,65 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         setState(() {
           _isCopying = false;
+        });
+      }
+    }
+  }
+
+  String _generateFolderStructure() {
+    final rootPath = _selectedDirectory;
+    if (rootPath == null) return '';
+
+    final buffer = StringBuffer()
+      ..writeln(path_util.basename(rootPath));
+
+    void appendChildren(List<FileNode> children, String prefix) {
+      for (var index = 0; index < children.length; index++) {
+        final child = children[index];
+        final isLast = index == children.length - 1;
+        buffer.writeln('$prefix${isLast ? '└── ' : '├── '}${child.name}');
+        if (child.isDirectory && child.children.isNotEmpty) {
+          appendChildren(child.children, '$prefix${isLast ? '    ' : '│   '}');
+        }
+      }
+    }
+
+    appendChildren(_nodes, '');
+    return buffer.toString();
+  }
+
+  Future<void> _copyFolderStructureToClipboard() async {
+    if (_selectedDirectory == null) return;
+
+    setState(() {
+      _isCopyingStructure = true;
+    });
+
+    try {
+      final structure = _generateFolderStructure();
+      await Clipboard.setData(ClipboardData(text: structure));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Copied folder structure to clipboard'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error copying folder structure: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCopyingStructure = false;
         });
       }
     }
