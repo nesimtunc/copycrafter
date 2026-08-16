@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -188,9 +189,14 @@ class _HomePageState extends State<HomePage> {
   int _totalFilesToProcess = 0; // Total files to process
   bool _progressDialogShown = false; // Track if progress dialog is shown
   bool _isSaving = false; // Track if saving to file is in progress
+  StreamSubscription<FileSystemEvent>? _directoryWatcher;
+  Timer? _refreshDebounce;
+  bool _isRefreshingDirectory = false;
 
   @override
   void dispose() {
+    _directoryWatcher?.cancel();
+    _refreshDebounce?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -1363,6 +1369,8 @@ class _HomePageState extends State<HomePage> {
             _viewMode = ViewMode.projectStructure;
           });
         }
+
+        _watchDirectory(selectedDirectory);
       }
     } catch (e) {
       if (mounted) {
@@ -1691,19 +1699,73 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _scanDirectory(String directoryPath) async {
-    // Clear existing data
-    _nodes = [];
-
     try {
       Directory directory = Directory(directoryPath);
-      _nodes = await _buildDirectoryTree(directory);
-      setState(() {});
+      final nodes = await _buildDirectoryTree(directory);
+      if (mounted) {
+        setState(() {
+          _nodes = nodes;
+          final availablePaths = <String>{};
+          void collectPaths(List<FileNode> entries) {
+            for (final entry in entries) {
+              availablePaths.add(entry.path);
+              collectPaths(entry.children);
+            }
+          }
+          collectPaths(nodes);
+          _selectedFiles.removeWhere((path) => !availablePaths.contains(path));
+          _selectedFolders.removeWhere((path) => !availablePaths.contains(path));
+          _updateNodeSelection();
+        });
+
+        // File modification events must also update token counts for selected files.
+        for (final filePath in List<String>.from(_selectedFiles)) {
+          await _calculateTokenCountForFile(filePath);
+        }
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error scanning directory: $e')),
         );
       }
+    }
+  }
+
+  void _watchDirectory(String directoryPath) {
+    _directoryWatcher?.cancel();
+    _directoryWatcher = Directory(directoryPath).watch(recursive: true).listen((_) {
+      _refreshDebounce?.cancel();
+      _refreshDebounce = Timer(const Duration(milliseconds: 250), _refreshDirectory);
+    }, onError: (Object error) {
+      debugPrint('Error watching directory $directoryPath: $error');
+    });
+  }
+
+  Future<void> _refreshDirectory() async {
+    final directoryPath = _selectedDirectory;
+    if (directoryPath == null || !mounted || _isRefreshingDirectory || _isLoading) return;
+
+    _isRefreshingDirectory = true;
+    try {
+      final foundProject = await _detectProject(directoryPath);
+      if (!foundProject && mounted) {
+        setState(() {
+          _projectNode = null;
+          _projectType = ProjectType.none;
+          _viewMode = ViewMode.fileSystem;
+        });
+      }
+      await _scanDirectory(directoryPath);
+      if (foundProject && mounted) {
+        setState(() {
+          if (_projectNode != null) {
+            _updateProjectNodeSelectionRecursive(_projectNode!);
+          }
+        });
+      }
+    } finally {
+      _isRefreshingDirectory = false;
     }
   }
 
